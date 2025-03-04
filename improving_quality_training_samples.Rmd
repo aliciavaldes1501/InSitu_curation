@@ -1,0 +1,867 @@
+---
+title: "Improving the quality of training samples"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+This scripts uses several pre-processing methods to improve the quality of training samples for machine learning classification of satellite images. 
+
+Documentation: https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html
+
+First, the training set should be cross-validated to assess its inherent prediction error (i.e. whether the data is internally consistent). Cross-validation does not predict actual model performance, and thus the quality of traning sets shold be improved using additional tools (HC, SOM, RSI). 
+
+# Load libraries
+
+```{r}
+library(dplyr)
+library(tibble)
+library(purrr)
+library(tidyr)
+library(sf)
+library(sits)
+library(kohonen)
+library(here)
+```
+
+# Load previously saved objects
+
+These objects took a long time to generate!
+
+```{r}
+samples_organized <- readRDS(file = here("r_objects", "samples_organized.rds"))
+#cross_val <- readRDS(file = here("r_objects", "cross_val.rds"))
+samples_SOM_cluster <- readRDS(here("r_objects", "samples_SOM_cluster.rds"))
+samples_SOM_new_cluster <- readRDS(file = here("r_objects", "samples_SOM_new_cluster.rds"))
+samples_RSI <- readRDS(here("r_objects", "samples_RSI.rds"))
+som_cluster_bal <- readRDS(file = here("r_objects", "som_cluster_bal.rds"))
+```
+
+# Data prep
+
+## Implementing csv to Rstudio format
+
+No need to run again if using saved objects!
+
+```{r eval=FALSE, include=TRUE}
+# Cargamos el csv en la ruta correspondiente.
+samples <- read.csv(here("data", "AT_ALPENNINNE.csv"))
+
+# Organizamos en el formato/estructura el csv para que RStudio acepte el formato. 
+
+samples_organized <- samples %>%
+  pivot_wider(names_from = "band", values_from = "value") %>%  # Volver a formato ancho
+  group_by(longitude, latitude, start_date, end_date, label, cube) %>%
+  nest(time_series = c(Index, B02, B03, B04, B08, B09, B10))  # Anidar las bandas
+
+samples_organized <- samples_organized %>%
+  mutate(time_series = map(time_series, ~ .x %>%
+                             # Convertir Index a formato Date
+                             mutate(Index = as.Date(Index, format = "%Y-%m-%d"))))
+
+# Accedemos a la primera time_series
+samples_organized$time_series[[1]]
+
+# Posiblemente en la integración de los datos puede llegar a haber en ocasiones
+# errores en el formato de los campos por lo que nos aseguramos de que cada campo tenga su formato.
+
+samples_organized <- samples_organized %>%
+  mutate(
+    start_date = as.Date(start_date, format = "%Y-%m-%d"),  # Convertir a formato Date
+    end_date = as.Date(end_date, format = "%Y-%m-%d"),      # Convertir a formato Date
+    label = as.character(label)  # Convertir a character
+  )
+
+saveRDS(samples_organized, file = here("r_objects", "samples_organized.rds"))
+```
+
+## Ungroup the samples
+
+We need ungroup() for some algorithms to work.
+
+```{r}
+samples_organized_ungr <- samples_organized %>% ungroup()
+```
+
+## Transform to sits class
+
+```{r}
+# Se implementa como un conjunto de datos en formato 'group_dbf' y
+# para aplicar los procesamientos que queremos tenemos que transformarlo a 'sits'.
+class(samples_organized) <- c("sits", class(samples_organized))
+class(samples_organized_ungr) <- c("sits", class(samples_organized_ungr))
+```
+
+# Obtaining samples using Rstudio (do not use)
+
+```{r eval=FALSE, include=TRUE}
+#####________________ COMANDO PARA REALIZAR LA OBTENCIÓN DE LOS SAMPLES MEDIANTE RSTUDIO ________________#####
+#####________ SIMPLEMENTE AGREGADO PARA CONOCER COMO SE HA OBTENIDO EL ARCHIVO DATA (NO USADO) __________#####
+
+# Cargamos el datacube en el formato que admite SITS.
+
+datacube <- sits_cube(
+  source = "MPC",
+  collection = "SENTINEL-2-L2A",
+  data_dir = "RUTA/AL/DATACUBE"
+)
+
+# Cargamos el shapefile de los puntos que solo deben contener la etiqueta 'label'.
+
+shp_file <- "RUTA/AL/SHAPEFILE.shp"
+if (file.exists(shp_file)) {
+  sf_shape <- st_read(shp_file)
+  print(sf_shape)
+} else {
+  stop("El archivo no existe en la ruta especificada.")
+}
+# Obtenemos el samples con el que podemos empezar a realizar los analisis.
+
+samples <- sits_get_data(
+  cube         = datacube,
+  samples      = sf_shape,
+  start_date = "2021-01-01",
+  end_date = "2021-12-31",
+  progress = TRUE
+)
+
+```
+
+# Statistics of samples
+
+Run on samples_organized.
+
+```{r}
+summary(samples_organized)
+```
+
+# Get labels, band, head and class of the samples
+
+```{r}
+sits_labels(samples_organized)
+sits_bands(samples_organized)
+head(samples_organized)
+class(samples_organized)
+```
+
+# Hierarchical cluster (HC) - ERROR
+
+Agglomerative Hierarchical Clustering (AHC). Higher computational complexity than SOM (so maybe SOM better for large data). AHC computes dissimilarity between two elements from a dataset. Decides which two clusters are merged at each iteration.
+
+dist_method: specifies how to calculate the distance between two time series
+
+linkage: defines the distance metric between clusters
+
+To cut the dendrogram, the sits_cluster_dendro() function computes the adjusted rand index (ARI), returning the height where the cut of the dendrogram maximizes the index. The result of sits_cluster_dendro() is a time series tibble with one additional column called “cluster”. 
+
+```{r eval=FALSE, include=TRUE}
+# Realizamos la agrupación que hace HC automáticamente.
+# Usamos un 1% de los datos y funciona
+# Con 10% sigue dando error!
+samples_HC_1 <- sits_cluster_dendro(samples = samples_organized_ungr %>%
+                                    sample_frac(0.01),
+                                  dist_method = "dtw_basic",
+                                  linkage = "ward.D2")
+saveRDS(samples_HC_1, file = here("r_objects", "samples_HC_1.rds"))
+```
+
+Try with one band only and 5% of the data (with all data still error).
+
+```{r eval=FALSE, include=TRUE}
+samples_HC_5_1band  <- sits_cluster_dendro(samples = samples_organized_ungr %>%
+                                          sample_frac(0.05),
+                                        bands = c("B02"),
+                                        dist_method = "dtw_basic",
+                                        linkage = "ward.D2")
+saveRDS(samples_HC_5_1band , file = here("r_objects", "samples_HC_5_1band rds"))
+```
+
+Error en matrix(0, x_len * (x_len + diagonal_factor)/2L, 1L): 
+valor de 'nrow' no válido (demasiado grande o NA)
+Además: Aviso:
+In x_len * (x_len + diagonal_factor) : NAs producidos por enteros excedidos
+
+The function sits_cluster_frequency() provides information on the composition of each cluster. Clusters might have a predominance of one label, or contain a mix of samples from several labels (confusion).
+
+Use dplyr::filter() to remove very "mixed" clusters.
+
+sits_cluster_clean() removes the outliers, leaving only the most frequent label for each cluster. After cleaning the samples, the resulting set of samples is likely to improve the classification results.
+
+```{r eval=FALSE, include=TRUE}
+sits_cluster_frequency(samples_HC_1)
+sits_cluster_frequency(samples_HC_5_1band)
+
+# How to know which cluster to remove? --> The ones with mixes of samples from different labels
+
+# samples_HC_clean <- dplyr::filter(samples_HC, cluster != 4)
+
+# Mostramos la agrupación para observar como se ha clasificado
+# y para eliminar el grupo realizado por el cluster sería el siguiente comando:
+
+samples_HC1_clean <- sits_cluster_clean(samples_HC_1) # Leaves very few samples!
+samples_HC5_1band_clean <- sits_cluster_clean(samples_HC_5_1band) # Leaves very few samples!
+samples_HC1_clean
+samples_HC5_1band_clean
+```
+
+# Self-organized map (SOM)
+
+## Creating the SOM map
+
+Clustering technique based on self-organizing maps (SOM). It is a dimensionality reduction technique where high-dimensional data is mapped into a two-dimensional map, keeping the topological relations between data patterns. The SOM 2D map is composed of "neurons". Each neuron has a weight vector, with the same dimension as the training samples. At the start, neurons are assigned a small random value and then trained by competitive learning. The algorithm computes the distances of each member of the training set to all neurons and finds the neuron closest to the input, called the best matching unit.
+
+When projecting a high-dimensional dataset into a 2D SOM map, the units of the map (called neurons) compete for each sample. Each time series will be mapped to one of the neurons. Since the number of neurons is smaller than the number of classes, each neuron will be associated with many time series. The resulting 2D map will be a set of clusters. Given that SOM preserves the topological structure of neighborhoods in multiple dimensions, clusters that contain training samples with a given label will usually be neighbors in 2D space. The neighbors of each neuron of a SOM map provide information on intraclass and interclass variability, which is used to detect noisy samples. 
+
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_cluster <- sits_som_map(samples_organized_ungr,
+                                    grid_xdim = 15,
+                                    grid_ydim = 15,
+                                    alpha = 1.0,
+                                    distance = "dtw",
+                                    rlen = 20)
+# Avisos:
+#   1: In sits_som_map(samples_organized_ungr, grid_xdim = 15, grid_ydim = 15,  :
+#      recommended values for grid_xdim and grid_ydim are (57 ...62)
+#   2: In RcppSupersom(data = data_matrix, codes = init_matrix, numVars = nvar,  :
+#      subscript out of bounds (index 1 >= vector size 1)
+#   3: In .colors_get(labels = kohonen_obj[["neuron_label"]], legend = NULL,  :
+#      missing colors for labels27, 41, 27, 51, 73, 51, 55, 51, 41, 41, 41, 41, 55, 51, 51, 27, 27, 41, 51, 1, 1, 51, 51, 41, 41, 41, 51, 55, 55, 41, 27, 27, 41, 41, 1, 51, 51, 51, 51, 41, 55, 55, 51, 51, 51, 27, 27, 41, 41, 41, 41, 51, 41, 51, 51, 55, 51, 51, 41, 41, 27, 27, 41, 41, 41, 41, 41, 41, 41, 41, 41, 51, 51, 41, 41, 27, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 30, 41, 41, 14, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 30, 41, 40, 41, 41, 41, 41, 27, 41, 41, 41, 41, 41, 41, 41, 27, 27, 41, 41, 41, 41, 27, 27, 27, 27, 41, 41, 41, 41, 41, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 51, 27, 27, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 51, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 41, 51, 41, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 41, 41, 41, 51, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 41, 41, 41, 41, 27, 27, 27, 27, 27, 27, 41, 41, 41, 51, 51, 41, 41, 41
+#   4: In .colors_get(labels = kohonen_obj[["neuron_label"]], legend = NULL,  : palette for missing colors isSet3
+saveRDS(samples_SOM_cluster, file = here("r_objects", "samples_SOM_cluster.rds"))
+```
+
+ Avisos:
+   1: In sits_som_map(samples_organized_ungr, grid_xdim = 15, grid_ydim = 15,  :
+      recommended values for grid_xdim and grid_ydim are (57 ...62)
+   2: In RcppSupersom(data = data_matrix, codes = init_matrix, numVars = nvar,  :
+      subscript out of bounds (index 1 >= vector size 1)
+   3: In .colors_get(labels = kohonen_obj[["neuron_label"]], legend = NULL,  :
+      missing colors for labels27, 41, 27, 51, 73, 51, 55, 51, 41, 41, 41, 41, 55, 51, 51, 27, 27, 41, 51, 1, 1, 51, 51, 41, 41, 41, 51, 55, 55, 41, 27, 27, 41, 41, 1, 51, 51, 51, 51, 41, 55, 55, 51, 51, 51, 27, 27, 41, 41, 41, 41, 51, 41, 51, 51, 55, 51, 51, 41, 41, 27, 27, 41, 41, 41, 41, 41, 41, 41, 41, 41, 51, 51, 41, 41, 27, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 30, 41, 41, 14, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 30, 41, 40, 41, 41, 41, 41, 27, 41, 41, 41, 41, 41, 41, 41, 27, 27, 41, 41, 41, 41, 27, 27, 27, 27, 41, 41, 41, 41, 41, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 51, 27, 27, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 51, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 41, 51, 41, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 41, 41, 41, 51, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 41, 41, 41, 41, 27, 27, 27, 27, 27, 27, 41, 41, 41, 51, 51, 41, 41, 41
+   4: In .colors_get(labels = kohonen_obj[["neuron_label"]], legend = NULL,  : palette for missing colors isSet3
+
+Plots for the SOM map (different bands).
+
+```{r}
+plot(samples_SOM_cluster, band = "B02")
+plot(samples_SOM_cluster, band = "B03")
+plot(samples_SOM_cluster, band = "B04")
+plot(samples_SOM_cluster, band = "B08")
+plot(samples_SOM_cluster, band = "B09")
+plot(samples_SOM_cluster, band = "B10")
+```
+
+See what to do with warning about the colors - not sure why the labels have so similar colors in the plot. Might need to change the color palette, but not sure how.
+
+## Measuring confusion between labels using SOM
+
+The function sits_som_evaluate_cluster() groups neurons by their majority label and produces a tibble. Neurons are grouped into clusters, and there will be as many clusters as there are labels. The results shows the percentage of samples of each label in each cluster. Ideally, all samples of each cluster would have the same label. In practice, clusters contain samples with different labels. This information helps on measuring the confusion between samples.
+
+```{r}
+som_eval <- sits_som_evaluate_cluster(samples_SOM_cluster)
+```
+
+Plot confusion between clusters.
+
+```{r}
+som_eval
+plot(som_eval)
+```
+
+Some classes missing in the above plot (there are 16 and only 9 are shown) - might have to do with warning about missing colors.
+
+## Detecting noisy samples using SOM
+
+This approach uses the discrete probability distribution associated with each neuron, which is included in the labeled_neurons tibble produced by sits_som_map(). This approach associates probabilities with frequency of occurrence. More homogeneous neurons (those with one label has high frequency) are assumed to be composed of good quality samples. Heterogeneous neurons (those with two or more classes with significant frequencies) are likely to contain noisy samples. 
+
+The function sits_som_clean_samples() finds out which samples are noisy, which are clean, and which need to be further examined by the user. 
+
+If the prior probability of a sample is less than prior_threshold, the sample is assumed to be noisy and tagged as “remove”. 
+
+If the prior probability is greater or equal to prior_threshold and the posterior probability calculated by Bayesian inference is greater or equal to posterior_threshold, the sample is assumed not to be noisy and thus is tagged as “clean”.
+
+If the prior probability is greater or equal to prior_threshold and the posterior probability is less than posterior_threshold, we have a situation when the sample is part of the majority level of those assigned to its neuron, but its label is not consistent with most of its neighbors. This is an anomalous condition and is tagged as “analyze”. Users are encouraged to inspect such samples to find out whether they are in fact noisy or not.
+
+The default value for both prior_threshold and posterior_threshold is 60%. 
+
+The sits_som_clean_samples() has an additional parameter (keep), which indicates which samples should be kept in the set based on their prior and posterior probabilities. The default for keep is c("clean", "analyze"). 
+
+```{r}
+samples_SOM_02_02 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.2,
+  posterior_threshold = 0.2,
+  keep = c("clean", "analyze")
+)
+samples_SOM_02_04 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.2,
+  posterior_threshold = 0.4,
+  keep = c("clean", "analyze")
+)
+samples_SOM_02_06 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.2,
+  posterior_threshold = 0.6,
+  keep = c("clean", "analyze")
+)
+samples_SOM_02_08 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.2,
+  posterior_threshold = 0.8,
+  keep = c("clean", "analyze")
+)
+samples_SOM_04_02 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.4,
+  posterior_threshold = 0.2,
+  keep = c("clean", "analyze")
+)
+samples_SOM_04_04 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.4,
+  posterior_threshold = 0.4,
+  keep = c("clean", "analyze")
+)
+samples_SOM_04_06 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.4,
+  posterior_threshold = 0.6,
+  keep = c("clean", "analyze")
+)
+samples_SOM_04_08 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.4,
+  posterior_threshold = 0.8,
+  keep = c("clean", "analyze")
+)
+samples_SOM_06_02 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.6,
+  posterior_threshold = 0.2,
+  keep = c("clean", "analyze")
+)
+samples_SOM_06_04 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.6,
+  posterior_threshold = 0.4,
+  keep = c("clean", "analyze")
+)
+samples_SOM_06_06 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.6,
+  posterior_threshold = 0.6,
+  keep = c("clean", "analyze")
+)
+samples_SOM_06_08 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.6,
+  posterior_threshold = 0.8,
+  keep = c("clean", "analyze")
+)
+samples_SOM_08_02 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.8,
+  posterior_threshold = 0.2,
+  keep = c("clean", "analyze")
+)
+samples_SOM_08_04 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.8,
+  posterior_threshold = 0.4,
+  keep = c("clean", "analyze")
+)
+samples_SOM_08_06 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.8,
+  posterior_threshold = 0.6,
+  keep = c("clean", "analyze")
+)
+samples_SOM_08_08 <- sits_som_clean_samples(
+  som_map = samples_SOM_cluster,
+  prior_threshold = 0.8,
+  posterior_threshold = 0.8,
+  keep = c("clean", "analyze")
+)
+```
+
+
+```{r}
+summary(samples_SOM_02_02)
+summary(samples_SOM_02_04)
+summary(samples_SOM_02_06)
+summary(samples_SOM_02_08)
+summary(samples_SOM_04_02)
+summary(samples_SOM_04_04)
+summary(samples_SOM_04_06)
+summary(samples_SOM_04_08)
+summary(samples_SOM_06_02)
+summary(samples_SOM_06_04)
+summary(samples_SOM_06_06)
+summary(samples_SOM_06_08)
+summary(samples_SOM_08_02)
+summary(samples_SOM_08_04)
+summary(samples_SOM_08_06)
+summary(samples_SOM_08_08)
+```
+
+
+This removes some / many labels!
+
+This is probably because samples of classes which had highest confusion with others have been removed. 
+
+How many to analyze / clean?
+
+```{r}
+samples_SOM_06_06 %>% count(eval)
+```
+
+Further analysis includes calculating the SOM map and confusion matrix for the new set.
+
+## Create the new SOM maps
+
+Evaluate the mixture in the SOM clusters of new samples.
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_02_02 <- sits_som_map(
+  data = samples_SOM_02_02,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_02_02, file = here("r_objects", "samples_SOM_new_cluster_02_02.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_02_04 <- sits_som_map(
+  data = samples_SOM_02_04,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_02_04, file = here("r_objects", "samples_SOM_new_cluster_02_04.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_02_06 <- sits_som_map(
+  data = samples_SOM_02_06,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_02_06, file = here("r_objects", "samples_SOM_new_cluster_02_06.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_02_08 <- sits_som_map(
+  data = samples_SOM_02_08,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_02_08, file = here("r_objects", "samples_SOM_new_cluster_02_08.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_04_02 <- sits_som_map(
+  data = samples_SOM_04_02,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_04_02, file = here("r_objects", "samples_SOM_new_cluster_04_02.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_04_04 <- sits_som_map(
+  data = samples_SOM_04_04,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_04_04, file = here("r_objects", "samples_SOM_new_cluster_04_04.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_04_06 <- sits_som_map(
+  data = samples_SOM_04_06,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_04_06, file = here("r_objects", "samples_SOM_new_cluster_04_06.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_04_08 <- sits_som_map(
+  data = samples_SOM_04_08,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_04_08, file = here("r_objects", "samples_SOM_new_cluster_04_08.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_06_02 <- sits_som_map(
+  data = samples_SOM_06_02,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_06_02, file = here("r_objects", "samples_SOM_new_cluster_06_02.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_06_04 <- sits_som_map(
+  data = samples_SOM_06_04,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_06_04, file = here("r_objects", "samples_SOM_new_cluster_06_04.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_06_06 <- sits_som_map(
+  data = samples_SOM_06_06,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_06_06, file = here("r_objects", "samples_SOM_new_cluster_06_06.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_06_08 <- sits_som_map(
+  data = samples_SOM_06_08,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_06_08, file = here("r_objects", "samples_SOM_new_cluster_06_08.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_08_02 <- sits_som_map(
+  data = samples_SOM_08_02,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_08_02, file = here("r_objects", "samples_SOM_new_cluster_08_02.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_08_04 <- sits_som_map(
+  data = samples_SOM_08_04,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_08_04, file = here("r_objects", "samples_SOM_new_cluster_08_04.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_08_06 <- sits_som_map(
+  data = samples_SOM_08_06,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_08_06, file = here("r_objects", "samples_SOM_new_cluster_08_06.rds"))
+```
+
+```{r eval=FALSE, include=TRUE}
+samples_SOM_new_cluster_08_08 <- sits_som_map(
+  data = samples_SOM_08_08,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  rlen = 20,
+  distance = "dtw"
+)
+
+saveRDS(samples_SOM_new_cluster_08_08, file = here("r_objects", "samples_SOM_new_cluster_08_08.rds"))
+```
+
+Plots for the new SOM maps
+
+```{r}
+plot(samples_SOM_new_cluster_06_06)
+```
+
+Same problem with colors here.
+
+## Measuring confusion between labels using the new SOM map
+
+```{r}
+new_som_eval_02_02 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_02_02)
+new_som_eval_02_04 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_02_04)
+new_som_eval_02_06 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_02_06)
+new_som_eval_02_08 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_02_08)
+new_som_eval_04_02 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_04_02)
+new_som_eval_04_04 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_04_04)
+new_som_eval_04_06 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_04_06)
+new_som_eval_04_08 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_04_08)
+new_som_eval_06_02 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_06_02)
+new_som_eval_06_04 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_06_04)
+new_som_eval_06_06 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_06_06)
+new_som_eval_06_08 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_06_08)
+new_som_eval_08_02 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_08_02)
+new_som_eval_08_04 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_08_04)
+new_som_eval_08_06 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_08_06)
+new_som_eval_08_08 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_08_08)
+```
+
+Plot confusion between clusters.
+
+```{r}
+# Plot the confusion between clusters
+plot(new_som_eval_02_02)
+plot(new_som_eval_02_04)
+plot(new_som_eval_02_06)
+plot(new_som_eval_02_08)
+plot(new_som_eval_04_02)
+plot(new_som_eval_04_04)
+plot(new_som_eval_04_06)
+plot(new_som_eval_04_08)
+plot(new_som_eval_06_02)
+plot(new_som_eval_06_04)
+plot(new_som_eval_06_06)
+plot(new_som_eval_06_08)
+plot(new_som_eval_08_02)
+plot(new_som_eval_08_04)
+plot(new_som_eval_08_06)
+plot(new_som_eval_08_08)
+```
+
+5 remaining labels on the plot.
+
+As expected, the new confusion map shows a significant improvement over the previous one. 
+
+# Reduce sample imbalance (RSI)
+
+Sample imbalance is an undesirable property of a training set since machine learning algorithms tend to be more accurate for classes with many samples. The instances belonging to the minority group are misclassified more often than those belonging to the majority group. Thus, reducing sample imbalance can positively affect classification accuracy. The function sits_reduce_imbalance() deals with training set imbalance; it increases the number of samples of least frequent labels, and reduces the number of samples of most frequent labels. 
+
+```{r}
+summary(samples_organized_ungr)
+```
+
+```{r eval=FALSE, include=TRUE}
+# Aplicamos los parámetros correctos de "máximo" y "mínimo" para reducir el samples.
+
+samples_RSI <- sits_reduce_imbalance(
+  samples = samples_organized_ungr,
+  n_samples_over = 200, # Min. number of samples per class. Changed (min count was 214)
+  n_samples_under = 2000, # Max. number of samples per class. Changed
+  multicores = 12
+)
+
+saveRDS(samples_RSI, file = here("r_objects", "samples_RSI.rds"))
+```
+
+Print the balanced samples.
+
+```{r}
+summary(samples_RSI)
+```
+
+## Creating the SOM map
+
+```{r eval=FALSE, include=TRUE}
+som_cluster_bal <- sits_som_map(
+  data = samples_RSI,
+  grid_xdim = 15,
+  grid_ydim = 15,
+  alpha = 1.0,
+  distance = "dtw",
+  rlen = 20,
+  mode = "pbatch" # Not sure why this one, from https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html
+  )
+
+saveRDS(som_cluster_bal, file = here("r_objects", "som_cluster_bal.rds"))
+```
+
+Plots.
+
+```{r}
+plot(som_cluster_bal, band = "B02")
+plot(som_cluster_bal, band = "B03")
+plot(som_cluster_bal, band = "B04")
+plot(som_cluster_bal, band = "B08")
+plot(som_cluster_bal, band = "B09")
+plot(som_cluster_bal, band = "B10")
+```
+
+## Measuring confusion between labels using SOM
+
+Produce a tibble with a summary of the mixed labels.
+
+```{r}
+som_eval_RSI <- sits_som_evaluate_cluster(som_cluster_bal)
+```
+
+Plot confusion between clusters.
+
+```{r}
+som_eval_RSI
+plot(som_eval_RSI)
+```
+
+Again warning about colors and missing labels on the graph.
+
+The balanced dataset shows less confusion per label than the unbalanced one.
+
+# Cross-validation
+
+## Original dataset
+
+Estimates the inherent prediction error of a model. Uses only the training samples. It is a measure of model performance on the training data, and not an estimate of overall map accuracy. Uses part of the available samples to fit the classification model and a different part to test it.
+
+```{r eval=FALSE, include=TRUE}
+# Cross-validation (uncertainties)
+# Default: validation_split = 0.2 (proportion of original time series set to be used for validation)
+# Default: Machine learning method (sits_rfor())
+# There is also sits_kfold_validate
+# https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html#cross-validation-of-training-sets
+
+cross_val <- sits_validate(samples_organized)
+saveRDS(cross_val, file = here("r_objects", "cross_val.rds"))
+
+# Shows ca. 80% accuracy
+# However, this accuracy does not guarantee a good classification result. 
+# It only shows if the training data is internally consistent. 
+# (https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html)
+```
+
+Show the result.
+
+```{r}
+cross_val
+```
+
+A high accuracy here does not guarantee a good classification result. It only shows if the training data is internally consistent. Cross-validation measures how well the model fits the training data. Using these results to measure classification accuracy is only valid if the training data is a good sample of the entire dataset.
+
+## HC: TBD
+
+## SOM
+
+```{r eval=FALSE, include=FALSE}
+cross_val_SOM_02_02 <- sits_validate(samples_SOM_02_02)
+saveRDS(cross_val_SOM_02_02, file = here("r_objects", "cross_val_SOM_02_02.rds"))
+cross_val_SOM_02_04 <- sits_validate(samples_SOM_02_04)
+saveRDS(cross_val_SOM_02_04, file = here("r_objects", "cross_val_SOM_02_04.rds"))
+cross_val_SOM_02_06 <- sits_validate(samples_SOM_02_06)
+saveRDS(cross_val_SOM_02_06, file = here("r_objects", "cross_val_SOM_02_06.rds"))
+cross_val_SOM_02_08 <- sits_validate(samples_SOM_02_08)
+saveRDS(cross_val_SOM_02_08, file = here("r_objects", "cross_val_SOM_02_08.rds"))
+cross_val_SOM_04_02 <- sits_validate(samples_SOM_04_02)
+saveRDS(cross_val_SOM_04_02, file = here("r_objects", "cross_val_SOM_04_02.rds"))
+cross_val_SOM_04_04 <- sits_validate(samples_SOM_04_04)
+saveRDS(cross_val_SOM_04_04, file = here("r_objects", "cross_val_SOM_04_04.rds"))
+cross_val_SOM_04_06 <- sits_validate(samples_SOM_04_06)
+saveRDS(cross_val_SOM_04_06, file = here("r_objects", "cross_val_SOM_04_06.rds"))
+cross_val_SOM_04_08 <- sits_validate(samples_SOM_04_08)
+saveRDS(cross_val_SOM_04_08, file = here("r_objects", "cross_val_SOM_04_08.rds"))
+cross_val_SOM_06_02 <- sits_validate(samples_SOM_06_02)
+saveRDS(cross_val_SOM_06_02, file = here("r_objects", "cross_val_SOM_06_02.rds"))
+cross_val_SOM_06_04 <- sits_validate(samples_SOM_06_04)
+saveRDS(cross_val_SOM_06_04, file = here("r_objects", "cross_val_SOM_06_04.rds"))
+cross_val_SOM_06_06 <- sits_validate(samples_SOM_06_06)
+saveRDS(cross_val_SOM_06_06, file = here("r_objects", "cross_val_SOM_06_06.rds"))
+cross_val_SOM_06_08 <- sits_validate(samples_SOM_06_08)
+saveRDS(cross_val_SOM_06_08, file = here("r_objects", "cross_val_SOM_06_08.rds"))
+cross_val_SOM_08_02 <- sits_validate(samples_SOM_08_02)
+saveRDS(cross_val_SOM_08_02, file = here("r_objects", "cross_val_SOM_08_02.rds"))
+cross_val_SOM_08_04 <- sits_validate(samples_SOM_08_04)
+saveRDS(cross_val_SOM_08_04, file = here("r_objects", "cross_val_SOM_08_04.rds"))
+cross_val_SOM_08_06 <- sits_validate(samples_SOM_08_06)
+saveRDS(cross_val_SOM_08_06, file = here("r_objects", "cross_val_SOM_08_06.rds"))
+cross_val_SOM_08_08 <- sits_validate(samples_SOM_08_08)
+saveRDS(cross_val_SOM_08_08, file = here("r_objects", "cross_val_SOM_08_08.rds"))
+```
+
+```{r}
+cross_val_SOM_02_02
+cross_val_SOM_04_02
+cross_val_SOM_06_02
+cross_val_SOM_08_02
+cross_val_SOM_02_04
+cross_val_SOM_04_04
+cross_val_SOM_06_04
+cross_val_SOM_08_04
+cross_val_SOM_02_06
+cross_val_SOM_04_06
+cross_val_SOM_06_06
+cross_val_SOM_08_06
+cross_val_SOM_02_08
+cross_val_SOM_04_08
+cross_val_SOM_06_08
+cross_val_SOM_08_08
+```
+
+## RSI
+
+```{r eval=FALSE, include=TRUE}
+cross_val_RSI <- sits_validate(samples_RSI)
+saveRDS(cross_val_RSI, file = here("r_objects", "cross_val_RSI.rds"))
+```
+
+```{r}
+cross_val_RSI
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
