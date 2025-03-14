@@ -1,0 +1,449 @@
+---
+title: "Data cleaning AT_ATLIBERIA"
+subtitle: "AT_ATLIBERIA"
+author: "Alicia Valdés"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+This script uses several pre-processing methods (SOM + RSI) to improve the quality of training samples for machine learning classification of satellite images. 
+
+Documentation: https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html
+
+# Load libraries
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(tibble)
+library(purrr)
+library(tidyr)
+library(sf)
+library(sits)
+library(kohonen)
+library(here)
+library(tidyverse)
+library(glue)
+library(gridExtra)
+```
+
+# Load previously saved objects
+
+When running the algorithms, I saved all results that took a long time to generate as R objects in a dedicated folder in my working directory. The code below reads all the objects in this folder.
+
+Below, the code chunks for each of the algorithms that generated these results is set with eval=FALSE to avoid running the algorithms again.
+
+```{r}
+# List all RDS files in the folder
+rds_files <- list.files(path = here("r_objects", "AT_ATLIBERIA"),
+                        pattern = "\\.rds$", full.names = TRUE)
+
+# Load all RDS files into a list
+loaded_objects <- lapply(rds_files, readRDS)
+
+# Name the list elements with the file names (without the .rds extension)
+names(loaded_objects) <- basename(rds_files) %>% tools::file_path_sans_ext()
+
+# Assign each object to a variable in the global environment
+list2env(loaded_objects, envir = .GlobalEnv)
+
+rm(rds_files)
+rm(loaded_objects)
+```
+
+# Data prep
+
+## Implementing csv to Rstudio format
+
+The code below converts the original csv file to the format needed. There is no need to run this again if using the previously saved objects.
+
+```{r eval=FALSE, include=TRUE}
+# Cargamos el csv en la ruta correspondiente.
+samples <- read.csv("C:/Data/PAs/AT_ATLIBERIA_R.csv")
+
+# Organizamos en el formato/estructura el csv para que RStudio acepte el formato. 
+
+samples_organized <- samples %>%
+  pivot_wider(names_from = "band", values_from = "value") %>%  # Volver a formato ancho
+  group_by(longitude, latitude, start_date, end_date, label, cube) %>%
+  nest(time_series = c(Index, B02, B03, B04, B08, B09, B10))  # Anidar las bandas
+
+samples_organized <- samples_organized %>%
+  mutate(time_series = purrr::map(time_series, ~ .x %>%
+                             # Convertir Index a formato Date
+                             mutate(Index = as.Date(Index, format = "%Y-%m-%d"))))
+
+# Accedemos a la primera time_series
+samples_organized$time_series[[1]]
+
+# Posiblemente en la integración de los datos puede llegar a haber en ocasiones
+# errores en el formato de los campos por lo que nos aseguramos de que cada campo tenga su formato.
+
+samples_organized <- samples_organized %>%
+  mutate(
+    start_date = as.Date(start_date, format = "%Y-%m-%d"),  # Convertir a formato Date
+    end_date = as.Date(end_date, format = "%Y-%m-%d"),      # Convertir a formato Date
+    label = as.character(label)  # Convertir a character
+  )
+```
+
+## Reclassification
+
+We cannot have label 14	=	2. Cropland together with labels 15	=	2.1. Arable land and 18	=	2.2. Permanent crops. We must reclassify 15 and 18 to 14.
+
+```{r eval=FALSE, include=TRUE}
+samples_organized <- samples_organized %>%
+  mutate(label = if_else(label == "15" | label == "18", "14", label))
+```
+
+## Filtering water samples
+
+Remove points where sum of the 12 NDVI values (B09) is > 0.1.
+
+```{r eval=FALSE, include=TRUE}
+samples_organized <- samples_organized %>%
+  unnest(time_series) %>%
+  mutate(sum_B09 = sum(B09)) %>%
+  filter(label != 73 | sum_B09 < 0.1) %>% # Keep all labels except 73
+  # and for label 73, keep those with sum_B09 < 0.1
+  nest(time_series = c(Index, B02, B03, B04, B08, B09, B10)) %>%
+  select(-sum_B09)
+saveRDS(samples_organized, 
+        file = here("r_objects", "AT_ATLIBERIA", "samples_organized.rds"))
+```
+
+## Ungroup the samples
+
+We need ungroup() for some algorithms to work.
+
+```{r}
+samples_organized_ungr <- samples_organized %>% ungroup()
+```
+
+## Transform to sits class
+
+```{r}
+# Se implementa como un conjunto de datos en formato 'group_dbf' y
+# para aplicar los procesamientos que queremos tenemos que transformarlo a 'sits'.
+class(samples_organized) <- c("sits", class(samples_organized))
+class(samples_organized_ungr) <- c("sits", class(samples_organized_ungr))
+```
+
+# Obtaining samples using Rstudio (do not use)
+
+No need to run the code below, this is just the code used to obtain the samples using Rstudio that we got from COTESA.
+
+```{r eval=FALSE, include=TRUE}
+#####________________ COMANDO PARA REALIZAR LA OBTENCIÓN DE LOS SAMPLES MEDIANTE RSTUDIO ________________#####
+#####________ SIMPLEMENTE AGREGADO PARA CONOCER COMO SE HA OBTENIDO EL ARCHIVO DATA (NO USADO) __________#####
+
+# Cargamos el datacube en el formato que admite SITS.
+
+datacube <- sits_cube(
+  source = "MPC",
+  collection = "SENTINEL-2-L2A",
+  data_dir = "RUTA/AL/DATACUBE"
+)
+
+# Cargamos el shapefile de los puntos que solo deben contener la etiqueta 'label'.
+
+shp_file <- "RUTA/AL/SHAPEFILE.shp"
+if (file.exists(shp_file)) {
+  sf_shape <- st_read(shp_file)
+  print(sf_shape)
+} else {
+  stop("El archivo no existe en la ruta especificada.")
+}
+# Obtenemos el samples con el que podemos empezar a realizar los analisis.
+
+samples <- sits_get_data(
+  cube         = datacube,
+  samples      = sf_shape,
+  start_date = "2021-01-01",
+  end_date = "2021-12-31",
+  progress = TRUE
+)
+
+```
+
+# Summary of samples
+
+```{r}
+summary(samples_organized)
+```
+
+Label 14 = previous label 14 + previous label 15 + previous label 18
+
+# Get labels, band, head and class of the samples
+
+```{r}
+sits_labels(samples_organized)
+sits_bands(samples_organized)
+head(samples_organized)
+class(samples_organized)
+```
+
+# Self-organized map (SOM)
+
+## Creating the SOM map
+
+Clustering technique based on self-organizing maps (SOM). It is a dimensionality reduction technique where high-dimensional data is mapped into a two-dimensional map, keeping the topological relations between data patterns. The SOM 2D map is composed of "neurons". Each neuron has a weight vector, with the same dimension as the training samples. At the start, neurons are assigned a small random value and then trained by competitive learning. The algorithm computes the distances of each member of the training set to all neurons and finds the neuron closest to the input, called the best matching unit.
+
+When projecting a high-dimensional dataset into a 2D SOM map, the units of the map (called neurons) compete for each sample. Each time series will be mapped to one of the neurons. Since the number of neurons is smaller than the number of classes, each neuron will be associated with many time series. The resulting 2D map will be a set of clusters. Given that SOM preserves the topological structure of neighborhoods in multiple dimensions, clusters that contain training samples with a given label will usually be neighbors in 2D space. The neighbors of each neuron of a SOM map provide information on intraclass and interclass variability, which is used to detect noisy samples. 
+
+(https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html)
+
+We use a grid size of 25 x 25 (we tested also with 15 x 15 but we saw that 25 x 25 was more conservative, keeping more classes). We keep alpha (starting learning rate) = 1.0, distance ="dtw" and rlen (number of iterations) = 20.
+
+```{r eval=FALSE, include=TRUE}
+start_time <- Sys.time()
+samples_SOM_cluster_25 <- sits_som_map(samples_organized_ungr,
+                                    grid_xdim = 25,
+                                    grid_ydim = 25,
+                                    alpha = 1.0,
+                                    distance = "dtw",
+                                    rlen = 20)
+end_time <- Sys.time()
+# Calculate the time difference in hours
+time_samples_SOM_cluster_25 <- difftime(end_time, start_time, units = "hours")
+print(time_samples_SOM_cluster_25)
+# Warnings
+saveRDS(samples_SOM_cluster_25,
+        file = here("r_objects", "AT_ATLIBERIA", "samples_SOM_cluster_25.rds"))
+```
+
+```{r}
+plot(samples_SOM_cluster_25)
+```
+
+## Measuring confusion between labels using SOM
+
+The function sits_som_evaluate_cluster() groups neurons by their majority label and produces a tibble. Neurons are grouped into clusters, and there will be as many clusters as there are labels. The results shows the percentage of samples of each label in each cluster. Ideally, all samples of each cluster would have the same label. In practice, clusters contain samples with different labels. This information helps on measuring the confusion between samples.
+
+```{r}
+som_eval_25 <- sits_som_evaluate_cluster(samples_SOM_cluster_25)
+```
+
+Plot confusion between clusters.
+
+```{r}
+som_eval_25
+plot(som_eval_25)
+```
+
+Some classes missing in the above plot (there are 16 and only 9 are shown) - might have to do with warning about missing colors.
+
+## Detecting noisy samples using SOM
+
+This approach uses the discrete probability distribution associated with each neuron, which is included in the labeled_neurons tibble produced by sits_som_map(). This approach associates probabilities with frequency of occurrence. More homogeneous neurons (those with one label has high frequency) are assumed to be composed of good quality samples. Heterogeneous neurons (those with two or more classes with significant frequencies) are likely to contain noisy samples. 
+
+The function sits_som_clean_samples() finds out which samples are noisy, which are clean, and which need to be further examined by the user. 
+
+If the prior probability of a sample is less than prior_threshold, the sample is assumed to be noisy and tagged as “remove”. 
+
+If the prior probability is greater or equal to prior_threshold and the posterior probability calculated by Bayesian inference is greater or equal to posterior_threshold, the sample is assumed not to be noisy and thus is tagged as “clean”.
+
+If the prior probability is greater or equal to prior_threshold and the posterior probability is less than posterior_threshold, we have a situation when the sample is part of the majority level of those assigned to its neuron, but its label is not consistent with most of its neighbors. This is an anomalous condition and is tagged as “analyze”. Users are encouraged to inspect such samples to find out whether they are in fact noisy or not.
+
+The default value for both prior_threshold and posterior_threshold is 60%. We have tried with different probabilities for each (0.2 - 0.4 - 0.6 -0.8), using all their possible combinations. We finally decided to keep both probabilities at 0.2 to be more conservative. Higher values of prior_treshold remove more labels, and values of prior_threshold larger than 0.2 always removed at least one of the level 1 labels. The value of posterior_threshold does not affect the labels that are removed, but instead the labels that are tagged as "analyze" (higher values of posterior_threshold tag more labels as "analyze").
+
+The sits_som_clean_samples() has an additional parameter (keep), which indicates which samples should be kept in the set based on their prior and posterior probabilities. The default for keep is c("clean", "analyze"). 
+
+Further analysis includes calculating the SOM map and confusion matrix for the new set.
+
+```{r}
+samples_SOM_25_02_02 <- sits_som_clean_samples(samples_SOM_cluster_25,
+                                               prior_threshold = 0.2,
+                                               posterior_threshold = 0.2,
+                                               keep = c("clean", "analyze"))
+```
+
+```{r}
+summary(samples_SOM_25_02_02)
+```
+
+## Create the new SOM map
+
+Evaluate the mixture in the SOM clusters of new samples.
+
+```{r eval=FALSE, include=TRUE}
+start_time <- Sys.time()
+samples_SOM_25_02_02_new_cluster <- sits_som_map(samples_SOM_25_02_02,
+                                              grid_xdim = 25,
+                                              grid_ydim = 25,
+                                              alpha = 1.0,
+                                              rlen = 20,
+                                              distance = "dtw")
+end_time <- Sys.time()
+# Calculate the time difference in hours
+time_samples_SOM_25_02_02_new_cluster <- 
+  difftime(end_time, start_time, units = "hours")
+print(time_samples_SOM_25_02_02_new_cluster)
+saveRDS(samples_SOM_25_02_02_new_cluster,
+        file = here("r_objects", "AT_ATLIBERIA",
+                    "samples_SOM_25_02_02_new_cluster.rds"))
+```
+
+## Measuring confusion between labels using the new SOM map
+
+```{r}
+new_som_eval_25_02_02 <-
+  sits_som_evaluate_cluster(samples_SOM_25_02_02_new_cluster)
+```
+
+Plot confusion between clusters.
+
+```{r}
+# Plot the confusion between clusters
+plot(new_som_eval_25_02_02)
+```
+
+# Reduce sample imbalance (RSI)
+
+Sample imbalance is an undesirable property of a training set since machine learning algorithms tend to be more accurate for classes with many samples. The instances belonging to the minority group are misclassified more often than those belonging to the majority group. Thus, reducing sample imbalance can positively affect classification accuracy. The function sits_reduce_imbalance() deals with training set imbalance; it increases the number of samples of least frequent labels, and reduces the number of samples of most frequent labels.
+
+We apply the RSI on the samples after applying SOM cleaning.
+
+```{r}
+summary(samples_SOM_25_02_02)
+```
+
+## HERE: Decide n_samples_under
+## Apply RSI
+
+RSI needs n_samples_over (minimum number of samples per class) and n_samples_under (maximum number of samples per class). We establish n_samples_over as the count of the class with the minimum number of samples. We establish n_samples_under on the basis of the a priori real probability of the distribution of each of the classes in each bioregion (based on CLC 2018 proportions).
+
+We set n_samples_over as the number of samples for the least abundant label. Calculations for n_samples_under are in the file RSI_n_samples_under.xlsx in the working directory. 
+
+```{r eval=FALSE, include=TRUE}
+samples_RSI <- sits_reduce_imbalance(
+  samples = samples_SOM_25_02_02, # Samples after applying SOM cleaning
+  n_samples_over = 214, # Min. number of samples per class
+  n_samples_under = 11285, # Max. number of samples per class (based on CLC 2018)
+  multicores = 12
+)
+
+saveRDS(samples_RSI, file = here("r_objects", "AT_ATLIBERIA", "samples_RSI.rds"))
+```
+
+Print the balanced samples.
+
+```{r}
+summary(samples_RSI)
+```
+
+## Creating the SOM map
+
+Clustering time series using SOM.
+
+```{r eval=FALSE, include=TRUE}
+som_cluster_bal <- sits_som_map(
+  data = samples_RSI,
+  grid_xdim = 25,
+  grid_ydim = 25,
+  alpha = 1.0,
+  distance = "dtw",
+  rlen = 20)
+
+saveRDS(som_cluster_bal, file = here("r_objects", "AT_ATLIBERIA", "som_cluster_bal.rds"))
+```
+
+
+```{r}
+plot(som_cluster_bal)
+```
+
+## Measuring confusion between labels
+
+Estimate the confusion between classes of the balanced dataset.
+
+Produce a tibble with a summary of the mixed labels.
+
+```{r}
+som_eval_RSI <- sits_som_evaluate_cluster(som_cluster_bal)
+```
+
+Plot confusion between clusters.
+
+```{r}
+som_eval_RSI
+plot(som_eval_RSI)
+```
+
+The balanced dataset shows less confusion per label than the unbalanced one.
+
+# Cross-validation
+
+## Original dataset
+
+Estimates the inherent prediction error of a model. Uses only the training samples. It is a measure of model performance on the training data, and not an estimate of overall map accuracy. Uses part of the available samples to fit the classification model and a different part to test it.
+
+```{r eval=FALSE, include=TRUE}
+# Cross-validation (uncertainties)
+# Default: validation_split = 0.2 (proportion of original time series set to be used for validation)
+# Default: Machine learning method (sits_rfor())
+# There is also sits_kfold_validate
+# https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html#cross-validation-of-training-sets
+start_time <- Sys.time()
+cross_val <- sits_validate(samples_organized)
+end_time <- Sys.time()
+# Calculate the time difference in hours
+time_cross_val <- difftime(end_time, start_time, units = "hours")
+print(time_cross_val)
+saveRDS(cross_val, file = here("r_objects", "AT_ATLIBERIA", "cross_val.rds"))
+
+# Shows ca. 80% accuracy
+# However, this accuracy does not guarantee a good classification result. 
+# It only shows if the training data is internally consistent. 
+# (https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html)
+```
+
+Show the result.
+
+```{r}
+cross_val
+```
+
+A high accuracy here does not guarantee a good classification result. It only shows if the training data is internally consistent. Cross-validation measures how well the model fits the training data. Using these results to measure classification accuracy is only valid if the training data is a good sample of the entire dataset.
+
+## After SOM
+
+```{r}
+start_time <- Sys.time()
+cross_val_SOM <- sits_validate(samples_SOM_25_02_02)
+end_time <- Sys.time()
+# Calculate the time difference in hours
+time_cross_val_SOM <- difftime(end_time, start_time, units = "hours")
+print(time_cross_val_SOM)
+saveRDS(cross_val_SOM,
+        file = here("r_objects", "AT_ATLIBERIA", "cross_val_SOM.rds"))
+```
+
+```{r}
+cross_val_SOM
+```
+
+## After SOM +  RSI
+
+```{r eval=FALSE, include=TRUE}
+start_time <- Sys.time()
+cross_val_SOM_RSI <- sits_validate(samples_RSI)
+end_time <- Sys.time()
+# Calculate the time difference in hours
+time_cross_val_SOM_RSI <- difftime(end_time, start_time, units = "hours")
+print(time_cross_val_SOM_RSI)
+saveRDS(cross_val_SOM_RSI,
+        file = here("r_objects", "AT_ATLIBERIA", "cross_val_SOM_RSI.rds"))
+```
+
+```{r}
+cross_val_SOM_RSI
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+

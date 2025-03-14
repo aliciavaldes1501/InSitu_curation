@@ -1,6 +1,6 @@
 ---
-title: "Data cleaning AT_ALPENNINNE"
-subtitle: "AT_ALPENNINNE"
+title: "Improving the quality of training samples"
+subtitle: "AT_ATLIBERIA"
 author: "Alicia Valdés"
 date: "`r format(Sys.time(), '%d %B %Y')`"
 output:
@@ -8,13 +8,13 @@ output:
   html_notebook: default
 ---
 
-This script uses several pre-processing methods (SOM + RSI) to improve the quality of training samples for machine learning classification of satellite images. 
+This scripts uses several pre-processing methods to improve the quality of training samples for machine learning classification of satellite images. 
 
 Documentation: https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html
 
 # Load libraries
 
-```{r message=FALSE, warning=FALSE}
+```{r}
 library(dplyr)
 library(tibble)
 library(purrr)
@@ -24,26 +24,26 @@ library(sits)
 library(kohonen)
 library(here)
 library(tidyverse)
-library(glue)
 library(gridExtra)
 ```
 
 # Load previously saved objects
 
-When running the algorithms, I saved all results that took a long time to generate as R objects in a dedicated folder in my working directory. The code below reads all the objects in this folder.
-
-Below, the code chunks for each of the algorithms that generated these results is set with eval=FALSE to avoid running the algorithms again.
+These objects took a long time to generate!
 
 ```{r}
 # List all RDS files in the folder
-rds_files <- list.files(path = here("r_objects", "AT_ALPENNINNE"),
+rds_files <- list.files(path = here("r_objects", "AT_ATLIBERIA"),
                         pattern = "\\.rds$", full.names = TRUE)
 
 # Load all RDS files into a list
 loaded_objects <- lapply(rds_files, readRDS)
 
-# Name the list elements with the file names (without the .rds extension)
+# Optionally, name the list elements with the file names (without the .rds extension)
 names(loaded_objects) <- basename(rds_files) %>% tools::file_path_sans_ext()
+
+# Print the names of the loaded objects
+print(names(loaded_objects))
 
 # Assign each object to a variable in the global environment
 list2env(loaded_objects, envir = .GlobalEnv)
@@ -56,11 +56,11 @@ rm(loaded_objects)
 
 ## Implementing csv to Rstudio format
 
-The code below converts the original csv file to the format needed. There is no need to run this again if using the previously saved objects.
+No need to run again if using saved objects!
 
 ```{r eval=FALSE, include=TRUE}
 # Cargamos el csv en la ruta correspondiente.
-samples <- read.csv("C:/Data/PAs/AT_ALPENNINNE.csv")
+samples <- read.csv("C:/Data/PAs/AT_ATLIBERIA_R.csv")
 
 # Organizamos en el formato/estructura el csv para que RStudio acepte el formato. 
 
@@ -70,7 +70,7 @@ samples_organized <- samples %>%
   nest(time_series = c(Index, B02, B03, B04, B08, B09, B10))  # Anidar las bandas
 
 samples_organized <- samples_organized %>%
-  mutate(time_series = map(time_series, ~ .x %>%
+  mutate(time_series = purrr::map(time_series, ~ .x %>%
                              # Convertir Index a formato Date
                              mutate(Index = as.Date(Index, format = "%Y-%m-%d"))))
 
@@ -96,7 +96,7 @@ We cannot have label 14	=	2. Cropland together with labels 15	=	2.1. Arable land
 samples_organized <- samples_organized %>%
   mutate(label = if_else(label == "15" | label == "18", "14", label))
 saveRDS(samples_organized, 
-        file = here("r_objects", "AT_ALPENNINNE", "samples_organized.rds"))
+        file = here("r_objects", "AT_ATLIBERIA", "samples_organized.rds"))
 ```
 
 ## Ungroup the samples
@@ -117,8 +117,6 @@ class(samples_organized_ungr) <- c("sits", class(samples_organized_ungr))
 ```
 
 # Obtaining samples using Rstudio (do not use)
-
-No need to run the code below, this is just the code used to obtain the samples using Rstudio that we got from COTESA.
 
 ```{r eval=FALSE, include=TRUE}
 #####________________ COMANDO PARA REALIZAR LA OBTENCIÓN DE LOS SAMPLES MEDIANTE RSTUDIO ________________#####
@@ -153,13 +151,13 @@ samples <- sits_get_data(
 
 ```
 
-# Summary of samples
+# Statistics of samples
+
+Run on samples_organized.
 
 ```{r}
 summary(samples_organized)
 ```
-
-Label 14 = previous label 14 + previous label 15 + previous label 18
 
 # Get labels, band, head and class of the samples
 
@@ -178,12 +176,6 @@ Clustering technique based on self-organizing maps (SOM). It is a dimensionality
 
 When projecting a high-dimensional dataset into a 2D SOM map, the units of the map (called neurons) compete for each sample. Each time series will be mapped to one of the neurons. Since the number of neurons is smaller than the number of classes, each neuron will be associated with many time series. The resulting 2D map will be a set of clusters. Given that SOM preserves the topological structure of neighborhoods in multiple dimensions, clusters that contain training samples with a given label will usually be neighbors in 2D space. The neighbors of each neuron of a SOM map provide information on intraclass and interclass variability, which is used to detect noisy samples. 
 
-(https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html)
-
-We try with two grid sizes: 15 x 15 and 25 x 25. 
-
-We keep alpha (starting learning rate) = 1.0, distance ="dtw" and rlen (number of iterations) = 20.
-
 ### Grid 15 x 15
 
 ```{r eval=FALSE, include=TRUE}
@@ -193,16 +185,8 @@ samples_SOM_cluster <- sits_som_map(samples_organized_ungr,
                                     alpha = 1.0,
                                     distance = "dtw",
                                     rlen = 20)
-# Avisos:
-#   1: In sits_som_map(samples_organized_ungr, grid_xdim = 15, grid_ydim = 15,  :
-#      recommended values for grid_xdim and grid_ydim are (57 ...62)
-#   2: In RcppSupersom(data = data_matrix, codes = init_matrix, numVars = nvar,  :
-#      subscript out of bounds (index 1 >= vector size 1)
-#   3: In .colors_get(labels = kohonen_obj[["neuron_label"]], legend = NULL,  :
-#      missing colors for labels27, 41, 27, 51, 73, 51, 55, 51, 41, 41, 41, 41, 55, 51, 51, 27, 27, 41, 51, 1, 1, 51, 51, 41, 41, 41, 51, 55, 55, 41, 27, 27, 41, 41, 1, 51, 51, 51, 51, 41, 55, 55, 51, 51, 51, 27, 27, 41, 41, 41, 41, 51, 41, 51, 51, 55, 51, 51, 41, 41, 27, 27, 41, 41, 41, 41, 41, 41, 41, 41, 41, 51, 51, 41, 41, 27, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 30, 41, 41, 14, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 30, 41, 40, 41, 41, 41, 41, 27, 41, 41, 41, 41, 41, 41, 41, 27, 27, 41, 41, 41, 41, 27, 27, 27, 27, 41, 41, 41, 41, 41, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 51, 27, 27, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 51, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 41, 51, 41, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 41, 41, 41, 51, 27, 27, 27, 27, 27, 27, 27, 41, 41, 41, 41, 41, 41, 41, 41, 41, 27, 27, 27, 27, 27, 27, 41, 41, 41, 51, 51, 41, 41, 41
-#   4: In .colors_get(labels = kohonen_obj[["neuron_label"]], legend = NULL,  : palette for missing colors isSet3
 saveRDS(samples_SOM_cluster,
-        file = here("r_objects", "AT_ALPENNINNE", "samples_SOM_cluster.rds"))
+        file = here("r_objects", "AT_ATLIBERIA", "samples_SOM_cluster.rds"))
 ```
 
  Avisos:
@@ -225,7 +209,7 @@ plot(samples_SOM_cluster, band = "B09")
 plot(samples_SOM_cluster, band = "B10")
 ```
 
-See what to do with warning about the colors - not sure why the labels have so similar colors in the plot. Might need to change the color palette, but not sure how. I don't think we need this so far.
+See what to do with warning about the colors - not sure why the labels have so similar colors in the plot. Might need to change the color palette, but not sure how.
 
 ### Grid 25 x 25
 
@@ -236,9 +220,8 @@ samples_SOM_cluster_25 <- sits_som_map(samples_organized_ungr,
                                     alpha = 1.0,
                                     distance = "dtw",
                                     rlen = 20)
-# Warnings
 saveRDS(samples_SOM_cluster_25,
-        file = here("r_objects", "AT_ALPENNINNE", "samples_SOM_cluster_25.rds"))
+        file = here("r_objects", "AT_ATLIBERIA", "samples_SOM_cluster_25.rds"))
 ```
 
 ## Measuring confusion between labels using SOM
@@ -273,33 +256,28 @@ If the prior probability is greater or equal to prior_threshold and the posterio
 
 If the prior probability is greater or equal to prior_threshold and the posterior probability is less than posterior_threshold, we have a situation when the sample is part of the majority level of those assigned to its neuron, but its label is not consistent with most of its neighbors. This is an anomalous condition and is tagged as “analyze”. Users are encouraged to inspect such samples to find out whether they are in fact noisy or not.
 
-The default value for both prior_threshold and posterior_threshold is 60%. We try with different probabilities for each (0.2 - 0.4 - 0.6 -0.8), using all their possible combinations.
+The default value for both prior_threshold and posterior_threshold is 60%. 
 
 The sits_som_clean_samples() has an additional parameter (keep), which indicates which samples should be kept in the set based on their prior and posterior probabilities. The default for keep is c("clean", "analyze"). 
 
 ### Grid 15 x 15
 
 ```{r}
-# Define a vector of threshold values
 thresholds <- c(0.2, 0.4, 0.6, 0.8)
 
-# Create a grid of all combinations of prior and posterior thresholds
 results <- expand_grid(prior = thresholds, posterior = thresholds) %>%
-  # Apply the sits_som_clean_samples function to each combination of thresholds
   mutate(result = map2(prior, posterior, ~ sits_som_clean_samples(
     som_map = samples_SOM_cluster,
     prior_threshold = .x,
     posterior_threshold = .y,
     keep = c("clean", "analyze")
   ))) %>%
-  # Create a name for each result based on the thresholds
   mutate(result_name = paste0("samples_SOM_",
                               gsub("\\.", "", as.character(prior)),
                               "_", gsub("\\.", "", as.character(posterior))))
 
-# Extract the results into individual variables in the global environment
+# Extracting results into individual variables
 list2env(setNames(results$result, results$result_name), .GlobalEnv)
-# Remove the results data frame to clean up the workspace
 rm(results)
 ```
 
@@ -327,26 +305,21 @@ Further analysis includes calculating the SOM map and confusion matrix for the n
 ### Grid 25 x 25
 
 ```{r}
-# Define a vector of threshold values
 thresholds <- c(0.2, 0.4, 0.6, 0.8)
 
-# Create a grid of all combinations of prior and posterior thresholds
 results <- expand_grid(prior = thresholds, posterior = thresholds) %>%
-  # Apply the sits_som_clean_samples function to each combination of thresholds
   mutate(result = map2(prior, posterior, ~ sits_som_clean_samples(
     som_map = samples_SOM_cluster_25,
     prior_threshold = .x,
     posterior_threshold = .y,
     keep = c("clean", "analyze")
   ))) %>%
-  # Create a name for each result based on the thresholds
   mutate(result_name = paste0("samples_SOM_25_",
                               gsub("\\.", "", as.character(prior)),
                               "_", gsub("\\.", "", as.character(posterior))))
 
-# Extract the results into individual variables in the global environment
+# Extracting results into individual variables
 list2env(setNames(results$result, results$result_name), .GlobalEnv)
-# Remove the results data frame to clean up the workspace
 rm(results)
 ```
 
@@ -476,138 +449,27 @@ grid.arrange(
 
 ## Create the new SOM maps
 
-### Grid 15 x 15
+So far, do this only for samples_SOM_25_02_02.
 
 Evaluate the mixture in the SOM clusters of new samples.
 
 ```{r eval=FALSE, include=TRUE}
-# List of all your sample objects
-sample_names <- c("samples_SOM_02_02", "samples_SOM_02_04", "samples_SOM_02_06",
-                  "samples_SOM_02_08", "samples_SOM_04_02", "samples_SOM_04_04",
-                  "samples_SOM_04_06", "samples_SOM_04_08", "samples_SOM_06_02",
-                  "samples_SOM_06_04", "samples_SOM_06_06", "samples_SOM_06_08",
-                  "samples_SOM_08_02", "samples_SOM_08_04", "samples_SOM_08_06",
-                  "samples_SOM_08_08")
-
-# Function to process each sample
-process_sample <- function(sample_name) {
-  sample_data <- get(sample_name)
-  new_cluster <- sits_som_map(
-    data = sample_data,
-    grid_xdim = 15,
-    grid_ydim = 15,
-    alpha = 1.0,
-    rlen = 20,
-    distance = "dtw"
-  )
-  saveRDS(new_cluster, file = here("r_objects", "AT_ALPENNINNE",
-                                   glue("{sample_name}_new_cluster.rds")))
-  }
-
-# Apply the function to each sample
-walk(sample_names, process_sample)
-```
-
-### Grid 25 x 25
-
-Evaluate the mixture in the SOM clusters of new samples.
-
-```{r eval=FALSE, include=TRUE}
-# List of all your sample objects
-sample_names_25 <- c("samples_SOM_25_02_02", "samples_SOM_25_02_04",
-                  "samples_SOM_25_02_06", "samples_SOM_25_02_08",
-                  "samples_SOM_25_04_02", "samples_SOM_25_04_04",
-                  "samples_SOM_25_04_06", "samples_SOM_25_04_08",
-                  "samples_SOM_25_06_02", "samples_SOM_25_06_04",
-                  "samples_SOM_25_06_06", "samples_SOM_25_06_08",
-                  "samples_SOM_25_08_02", "samples_SOM_25_08_04",
-                  "samples_SOM_25_08_06", "samples_SOM_25_08_08")
-
-# Function to process each sample
-process_sample_25 <- function(sample_name) {
-  sample_data <- get(sample_name)
-  new_cluster <- sits_som_map(
-    data = sample_data,
-    grid_xdim = 25,
-    grid_ydim = 25,
-    alpha = 1.0,
-    rlen = 20,
-    distance = "dtw"
-  )
-  saveRDS(new_cluster, file = here("r_objects", "AT_ALPENNINNE",
-                                   glue("{sample_name}_new_cluster.rds")))
-  }
-
-# Apply the function to each sample
-walk(sample_names_25, process_sample_25)
+samples_SOM_25_02_02_new_cluster <- sits_som_map(samples_SOM_25_02_02,
+                                              grid_xdim = 25,
+                                              grid_ydim = 25,
+                                              alpha = 1.0,
+                                              rlen = 20,
+                                              distance = "dtw")
+saveRDS(samples_SOM_25_02_02_new_cluster,
+        file = here("r_objects", "AT_ATLIBERIA", "samples_SOM_25_02_02_new_cluster.rds"))
 ```
 
 ## Measuring confusion between labels using the new SOM map
 
-### Grid 15 x 15
-
-```{r}
-new_som_eval_02_02 <- sits_som_evaluate_cluster(samples_SOM_02_02_new_cluster)
-new_som_eval_02_04 <- sits_som_evaluate_cluster(samples_SOM_02_04_new_cluster)
-new_som_eval_02_06 <- sits_som_evaluate_cluster(samples_SOM_02_06_new_cluster)
-new_som_eval_02_08 <- sits_som_evaluate_cluster(samples_SOM_02_08_new_cluster)
-new_som_eval_04_02 <- sits_som_evaluate_cluster(samples_SOM_04_02_new_cluster)
-new_som_eval_04_04 <- sits_som_evaluate_cluster(samples_SOM_04_04_new_cluster)
-new_som_eval_04_06 <- sits_som_evaluate_cluster(samples_SOM_04_06_new_cluster)
-new_som_eval_04_08 <- sits_som_evaluate_cluster(samples_SOM_04_08_new_cluster)
-new_som_eval_06_02 <- sits_som_evaluate_cluster(samples_SOM_06_02_new_cluster)
-new_som_eval_06_04 <- sits_som_evaluate_cluster(samples_SOM_06_04_new_cluster)
-new_som_eval_06_06 <- sits_som_evaluate_cluster(samples_SOM_06_06_new_cluster)
-new_som_eval_06_08 <- sits_som_evaluate_cluster(samples_SOM_06_08_new_cluster)
-new_som_eval_08_02 <- sits_som_evaluate_cluster(samples_SOM_08_02_new_cluster)
-new_som_eval_08_04 <- sits_som_evaluate_cluster(samples_SOM_08_04_new_cluster)
-new_som_eval_08_06 <- sits_som_evaluate_cluster(samples_SOM_08_06_new_cluster)
-new_som_eval_08_08 <- sits_som_evaluate_cluster(samples_SOM_08_08_new_cluster)
-```
-
-Plot confusion between clusters.
-
-```{r}
-# Plot the confusion between clusters
-plot(new_som_eval_02_02)
-plot(new_som_eval_02_04)
-plot(new_som_eval_02_06)
-plot(new_som_eval_02_08)
-plot(new_som_eval_04_02)
-plot(new_som_eval_04_04)
-plot(new_som_eval_04_06)
-plot(new_som_eval_04_08)
-plot(new_som_eval_06_02)
-plot(new_som_eval_06_04)
-plot(new_som_eval_06_06)
-plot(new_som_eval_06_08)
-plot(new_som_eval_08_02)
-plot(new_som_eval_08_04)
-plot(new_som_eval_08_06)
-plot(new_som_eval_08_08)
-```
-
-As expected, the new confusion map shows a significant improvement over the previous one.
-
-### Grid 25 x 25
+So far, do this only for samples_SOM_25_02_02_new_cluster.
 
 ```{r}
 new_som_eval_25_02_02 <- sits_som_evaluate_cluster(samples_SOM_25_02_02_new_cluster)
-new_som_eval_25_02_04 <- sits_som_evaluate_cluster(samples_SOM_25_02_04_new_cluster)
-new_som_eval_25_02_06 <- sits_som_evaluate_cluster(samples_SOM_25_02_06_new_cluster)
-new_som_eval_25_02_08 <- sits_som_evaluate_cluster(samples_SOM_25_02_08_new_cluster)
-new_som_eval_25_04_02 <- sits_som_evaluate_cluster(samples_SOM_25_04_02_new_cluster)
-new_som_eval_25_04_04 <- sits_som_evaluate_cluster(samples_SOM_25_04_04_new_cluster)
-new_som_eval_25_04_06 <- sits_som_evaluate_cluster(samples_SOM_25_04_06_new_cluster)
-new_som_eval_25_04_08 <- sits_som_evaluate_cluster(samples_SOM_25_04_08_new_cluster)
-new_som_eval_25_06_02 <- sits_som_evaluate_cluster(samples_SOM_25_06_02_new_cluster)
-new_som_eval_25_06_04 <- sits_som_evaluate_cluster(samples_SOM_25_06_04_new_cluster)
-new_som_eval_25_06_06 <- sits_som_evaluate_cluster(samples_SOM_25_06_06_new_cluster)
-new_som_eval_25_06_08 <- sits_som_evaluate_cluster(samples_SOM_25_06_08_new_cluster)
-new_som_eval_25_08_02 <- sits_som_evaluate_cluster(samples_SOM_25_08_02_new_cluster)
-new_som_eval_25_08_04 <- sits_som_evaluate_cluster(samples_SOM_25_08_04_new_cluster)
-new_som_eval_25_08_06 <- sits_som_evaluate_cluster(samples_SOM_25_08_06_new_cluster)
-new_som_eval_25_08_08 <- sits_som_evaluate_cluster(samples_SOM_25_08_08_new_cluster)
 ```
 
 Plot confusion between clusters.
@@ -615,22 +477,163 @@ Plot confusion between clusters.
 ```{r}
 # Plot the confusion between clusters
 plot(new_som_eval_25_02_02)
-plot(new_som_eval_25_02_04)
-plot(new_som_eval_25_02_06)
-plot(new_som_eval_25_02_08)
-plot(new_som_eval_25_04_02)
-plot(new_som_eval_25_04_04)
-plot(new_som_eval_25_04_06)
-plot(new_som_eval_25_04_08)
-plot(new_som_eval_25_06_02)
-plot(new_som_eval_25_06_04)
-plot(new_som_eval_25_06_06)
-plot(new_som_eval_25_06_08)
-plot(new_som_eval_25_08_02)
-plot(new_som_eval_25_08_04)
-plot(new_som_eval_25_08_06)
-plot(new_som_eval_25_08_08)
 ```
+
+<!-- ### Grid 15 x 15 -->
+
+<!-- Evaluate the mixture in the SOM clusters of new samples. -->
+
+<!-- ```{r eval=FALSE, include=TRUE} -->
+<!-- # List of all your sample objects -->
+<!-- sample_names <- c("samples_SOM_02_02", "samples_SOM_02_04", "samples_SOM_02_06", -->
+<!--                   "samples_SOM_02_08", "samples_SOM_04_02", "samples_SOM_04_04", -->
+<!--                   "samples_SOM_04_06", "samples_SOM_04_08", "samples_SOM_06_02", -->
+<!--                   "samples_SOM_06_04", "samples_SOM_06_06", "samples_SOM_06_08", -->
+<!--                   "samples_SOM_08_02", "samples_SOM_08_04", "samples_SOM_08_06", -->
+<!--                   "samples_SOM_08_08") -->
+
+<!-- # Function to process each sample -->
+<!-- process_sample <- function(sample_name) { -->
+<!--   sample_data <- get(sample_name) -->
+<!--   new_cluster <- sits_som_map( -->
+<!--     data = sample_data, -->
+<!--     grid_xdim = 15, -->
+<!--     grid_ydim = 15, -->
+<!--     alpha = 1.0, -->
+<!--     rlen = 20, -->
+<!--     distance = "dtw" -->
+<!--   ) -->
+<!--   saveRDS(new_cluster, file = here("r_objects", "AT_ATLIBERIA", -->
+<!--                                    glue("{sample_name}_new_cluster.rds"))) -->
+<!--   } -->
+
+<!-- # Apply the function to each sample -->
+<!-- walk(sample_names, process_sample) -->
+<!-- ``` -->
+
+<!-- ### Grid 25 x 25 -->
+
+<!-- Evaluate the mixture in the SOM clusters of new samples. -->
+
+<!-- ```{r eval=FALSE, include=TRUE} -->
+<!-- # List of all your sample objects -->
+<!-- sample_names_25 <- c("samples_SOM_25_02_02", "samples_SOM_25_02_04", -->
+<!--                   "samples_SOM_25_02_06", "samples_SOM_25_02_08", -->
+<!--                   "samples_SOM_25_04_02", "samples_SOM_25_04_04", -->
+<!--                   "samples_SOM_25_04_06", "samples_SOM_25_04_08", -->
+<!--                   "samples_SOM_25_06_02", "samples_SOM_25_06_04", -->
+<!--                   "samples_SOM_25_06_06", "samples_SOM_25_06_08", -->
+<!--                   "samples_SOM_25_08_02", "samples_SOM_25_08_04", -->
+<!--                   "samples_SOM_25_08_06", "samples_SOM_25_08_08") -->
+
+<!-- # Function to process each sample -->
+<!-- process_sample_25 <- function(sample_name) { -->
+<!--   sample_data <- get(sample_name) -->
+<!--   new_cluster <- sits_som_map( -->
+<!--     data = sample_data, -->
+<!--     grid_xdim = 25, -->
+<!--     grid_ydim = 25, -->
+<!--     alpha = 1.0, -->
+<!--     rlen = 20, -->
+<!--     distance = "dtw" -->
+<!--   ) -->
+<!--   saveRDS(new_cluster, file = here("r_objects", "AT_ATLIBERIA", -->
+<!--                                    glue("{sample_name}_new_cluster.rds"))) -->
+<!--   } -->
+
+<!-- # Apply the function to each sample -->
+<!-- walk(sample_names_25, process_sample) -->
+<!-- ``` -->
+
+<!-- ## Measuring confusion between labels using the new SOM map -->
+
+<!-- ### Grid 15 x 15 -->
+
+<!-- ```{r} -->
+<!-- new_som_eval_02_02 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_02_02) -->
+<!-- new_som_eval_02_04 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_02_04) -->
+<!-- new_som_eval_02_06 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_02_06) -->
+<!-- new_som_eval_02_08 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_02_08) -->
+<!-- new_som_eval_04_02 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_04_02) -->
+<!-- new_som_eval_04_04 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_04_04) -->
+<!-- new_som_eval_04_06 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_04_06) -->
+<!-- new_som_eval_04_08 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_04_08) -->
+<!-- new_som_eval_06_02 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_06_02) -->
+<!-- new_som_eval_06_04 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_06_04) -->
+<!-- new_som_eval_06_06 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_06_06) -->
+<!-- new_som_eval_06_08 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_06_08) -->
+<!-- new_som_eval_08_02 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_08_02) -->
+<!-- new_som_eval_08_04 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_08_04) -->
+<!-- new_som_eval_08_06 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_08_06) -->
+<!-- new_som_eval_08_08 <- sits_som_evaluate_cluster(samples_SOM_new_cluster_08_08) -->
+<!-- ``` -->
+
+<!-- Plot confusion between clusters. -->
+
+<!-- ```{r} -->
+<!-- # Plot the confusion between clusters -->
+<!-- plot(new_som_eval_02_02) -->
+<!-- plot(new_som_eval_02_04) -->
+<!-- plot(new_som_eval_02_06) -->
+<!-- plot(new_som_eval_02_08) -->
+<!-- plot(new_som_eval_04_02) -->
+<!-- plot(new_som_eval_04_04) -->
+<!-- plot(new_som_eval_04_06) -->
+<!-- plot(new_som_eval_04_08) -->
+<!-- plot(new_som_eval_06_02) -->
+<!-- plot(new_som_eval_06_04) -->
+<!-- plot(new_som_eval_06_06) -->
+<!-- plot(new_som_eval_06_08) -->
+<!-- plot(new_som_eval_08_02) -->
+<!-- plot(new_som_eval_08_04) -->
+<!-- plot(new_som_eval_08_06) -->
+<!-- plot(new_som_eval_08_08) -->
+<!-- ``` -->
+
+<!-- As expected, the new confusion map shows a significant improvement over the previous one. -->
+
+<!-- ### Grid 25 x 25 -->
+
+<!-- ```{r} -->
+<!-- new_som_eval_25_02_02 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_02_02) -->
+<!-- new_som_eval_25_02_04 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_02_04) -->
+<!-- new_som_eval_25_02_06 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_02_06) -->
+<!-- new_som_eval_25_02_08 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_02_08) -->
+<!-- new_som_eval_25_04_02 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_04_02) -->
+<!-- new_som_eval_25_04_04 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_04_04) -->
+<!-- new_som_eval_25_04_06 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_04_06) -->
+<!-- new_som_eval_25_04_08 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_04_08) -->
+<!-- new_som_eval_25_06_02 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_06_02) -->
+<!-- new_som_eval_25_06_04 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_06_04) -->
+<!-- new_som_eval_25_06_06 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_06_06) -->
+<!-- new_som_eval_25_06_08 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_06_08) -->
+<!-- new_som_eval_25_08_02 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_08_02) -->
+<!-- new_som_eval_25_08_04 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_08_04) -->
+<!-- new_som_eval_25_08_06 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_08_06) -->
+<!-- new_som_eval_25_08_08 <- sits_som_evaluate_cluster(samples_SOM_25_new_cluster_08_08) -->
+<!-- ``` -->
+
+<!-- Plot confusion between clusters. -->
+
+<!-- ```{r} -->
+<!-- # Plot the confusion between clusters -->
+<!-- plot(new_som_eval_25_02_02) -->
+<!-- plot(new_som_eval_25_02_04) -->
+<!-- plot(new_som_eval_25_02_06) -->
+<!-- plot(new_som_eval_25_02_08) -->
+<!-- plot(new_som_eval_25_04_02) -->
+<!-- plot(new_som_eval_25_04_04) -->
+<!-- plot(new_som_eval_25_04_06) -->
+<!-- plot(new_som_eval_25_04_08) -->
+<!-- plot(new_som_eval_25_06_02) -->
+<!-- plot(new_som_eval_25_06_04) -->
+<!-- plot(new_som_eval_25_06_06) -->
+<!-- plot(new_som_eval_25_06_08) -->
+<!-- plot(new_som_eval_25_08_02) -->
+<!-- plot(new_som_eval_25_08_04) -->
+<!-- plot(new_som_eval_25_08_06) -->
+<!-- plot(new_som_eval_25_08_08) -->
+<!-- ``` -->
 
 # Reduce sample imbalance (RSI)
 
@@ -639,14 +642,6 @@ Sample imbalance is an undesirable property of a training set since machine lear
 ```{r}
 summary(samples_organized_ungr)
 ```
-
-## Calculate n_samples_under
-
-RSI needs n_samples_over (minimum number of samples per class) and n_samples_under (maximum number of samples per class). We establish n_samples_over as the count of the class with the minimum number of samples. We establish n_samples_under on the basis of the a prior real probability of the distribution of each of the classess in each bioregion (based on CLC 2018 proportions).
-
-Read table with 
-
-## Apply RSI
 
 ## TBD: n_samples_under
 
@@ -662,7 +657,7 @@ samples_RSI <- sits_reduce_imbalance(
   multicores = 12
 )
 
-saveRDS(samples_RSI, file = here("r_objects", "AT_ALPENNINNE", "samples_RSI.rds"))
+saveRDS(samples_RSI, file = here("r_objects", "AT_ATLIBERIA", "samples_RSI.rds"))
 ```
 
 Print the balanced samples.
@@ -684,7 +679,7 @@ som_cluster_bal <- sits_som_map(
   mode = "pbatch" # Not sure why this one, from https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html
   )
 
-saveRDS(som_cluster_bal, file = here("r_objects", "AT_ALPENNINNE", "som_cluster_bal.rds"))
+saveRDS(som_cluster_bal, file = here("r_objects", "AT_ATLIBERIA", "som_cluster_bal.rds"))
 ```
 
 Plots.
@@ -731,7 +726,7 @@ Estimates the inherent prediction error of a model. Uses only the training sampl
 # https://e-sensing.github.io/sitsbook/improving-the-quality-of-training-samples.html#cross-validation-of-training-sets
 
 cross_val <- sits_validate(samples_organized)
-saveRDS(cross_val, file = here("r_objects", "AT_ALPENNINNE", "cross_val.rds"))
+saveRDS(cross_val, file = here("r_objects", "AT_ATLIBERIA", "cross_val.rds"))
 
 # Shows ca. 80% accuracy
 # However, this accuracy does not guarantee a good classification result. 
@@ -749,110 +744,123 @@ A high accuracy here does not guarantee a good classification result. It only sh
 
 ## SOM
 
-### Grid 15 x 15
+So far, do this only for samples_SOM_25_02_02.
 
 ```{r}
-sample_names <- c("samples_SOM_02_02_new_cluster",
-                  "samples_SOM_02_04_new_cluster",
-                  "samples_SOM_02_06_new_cluster",
-                  "samples_SOM_02_08_new_cluster",
-                  "samples_SOM_04_02_new_cluster",
-                  "samples_SOM_04_04_new_cluster",
-                  "samples_SOM_04_06_new_cluster",
-                  "samples_SOM_04_08_new_cluster",
-                  "samples_SOM_06_02_new_cluster",
-                  "samples_SOM_06_04_new_cluster",
-                  "samples_SOM_06_06_new_cluster",
-                  "samples_SOM_06_08_new_cluster",
-                  "samples_SOM_08_02_new_cluster",
-                  "samples_SOM_08_04_new_cluster",
-                  "samples_SOM_08_06_new_cluster",
-                  "samples_SOM_08_08_new_cluster")
-```
-
-
-```{r eval=FALSE, include=FALSE}
-# Function to validate and save each sample
-validate_and_save <- function(sample_name) {
-  sample_data <- get(sample_name)
-  cross_val <- sits_validate(sample_data$data)
-  saveRDS(cross_val, file = here("r_objects", "AT_ALPENNINNE",
-                                 glue("cross_val_{sample_name}.rds")))
-  }
-
-# Apply the function to each sample
-walk(sample_names, validate_and_save)
-```
-
-```{r}
-cross_val_samples_SOM_02_02_new_cluster
-cross_val_samples_SOM_04_02_new_cluster
-cross_val_samples_SOM_06_02_new_cluster
-cross_val_samples_SOM_08_02_new_cluster
-cross_val_samples_SOM_02_04_new_cluster
-cross_val_samples_SOM_04_04_new_cluster
-cross_val_samples_SOM_06_04_new_cluster
-cross_val_samples_SOM_08_04_new_cluster
-cross_val_samples_SOM_02_06_new_cluster
-cross_val_samples_SOM_04_06_new_cluster
-cross_val_samples_SOM_06_06_new_cluster
-cross_val_samples_SOM_08_06_new_cluster
-cross_val_samples_SOM_02_08_new_cluster
-cross_val_samples_SOM_04_08_new_cluster
-cross_val_samples_SOM_06_08_new_cluster
-cross_val_samples_SOM_08_08_new_cluster
-```
-
-### Grid 25 x 25
-
-```{r}
-sample_names_25 <- c("samples_SOM_25_02_02_new_cluster",
-                  "samples_SOM_25_02_04_new_cluster",
-                  "samples_SOM_25_02_06_new_cluster",
-                  "samples_SOM_25_02_08_new_cluster",
-                  "samples_SOM_25_04_02_new_cluster",
-                  "samples_SOM_25_04_04_new_cluster",
-                  "samples_SOM_25_04_06_new_cluster",
-                  "samples_SOM_25_04_08_new_cluster",
-                  "samples_SOM_25_06_02_new_cluster",
-                  "samples_SOM_25_06_04_new_cluster",
-                  "samples_SOM_25_06_06_new_cluster",
-                  "samples_SOM_25_06_08_new_cluster",
-                  "samples_SOM_25_08_02_new_cluster",
-                  "samples_SOM_25_08_04_new_cluster",
-                  "samples_SOM_25_08_06_new_cluster",
-                  "samples_SOM_25_08_08_new_cluster")
-```
-
-```{r}
-# Apply the function to each sample
-walk(sample_names_25, validate_and_save)
+cross_val_samples_SOM_25_02_02_new_cluster <- sits_validate(samples_SOM_25_02_02.)
+saveRDS(cross_val_samples_SOM_25_02_02_new_cluster,
+        file = here("r_objects", "AT_ATLIBERIA", "cross_val_samples_SOM_25_02_02_new_cluster.rds"))
 ```
 
 ```{r}
 cross_val_samples_SOM_25_02_02_new_cluster
-cross_val_samples_SOM_25_04_02_new_cluster
-cross_val_samples_SOM_25_06_02_new_cluster
-cross_val_samples_SOM_25_08_02_new_cluster
-cross_val_samples_SOM_25_02_04_new_cluster
-cross_val_samples_SOM_25_04_04_new_cluster
-cross_val_samples_SOM_25_06_04_new_cluster
-cross_val_samples_SOM_25_08_04_new_cluster
-cross_val_samples_SOM_25_02_06_new_cluster
-cross_val_samples_SOM_25_04_06_new_cluster
-cross_val_samples_SOM_25_06_06_new_cluster
-cross_val_samples_SOM_25_08_06_new_cluster
-cross_val_samples_SOM_25_02_08_new_cluster
-cross_val_samples_SOM_25_04_08_new_cluster
-cross_val_samples_SOM_25_06_08_new_cluster
-cross_val_samples_SOM_25_08_08_new_cluster
 ```
+
+
+<!-- ### Grid 15 x 15 -->
+
+<!-- ```{r} -->
+<!-- sample_names <- c("samples_SOM_02_02_new_cluster", -->
+<!--                   "samples_SOM_02_04_new_cluster", -->
+<!--                   "samples_SOM_02_06_new_cluster", -->
+<!--                   "samples_SOM_02_08_new_cluster", -->
+<!--                   "samples_SOM_04_02_new_cluster", -->
+<!--                   "samples_SOM_04_04_new_cluster", -->
+<!--                   "samples_SOM_04_06_new_cluster", -->
+<!--                   "samples_SOM_04_08_new_cluster", -->
+<!--                   "samples_SOM_06_02_new_cluster", -->
+<!--                   "samples_SOM_06_04_new_cluster", -->
+<!--                   "samples_SOM_06_06_new_cluster", -->
+<!--                   "samples_SOM_06_08_new_cluster", -->
+<!--                   "samples_SOM_08_02_new_cluster", -->
+<!--                   "samples_SOM_08_04_new_cluster", -->
+<!--                   "samples_SOM_08_06_new_cluster", -->
+<!--                   "samples_SOM_08_08_new_cluster") -->
+<!-- ``` -->
+
+
+<!-- ```{r eval=FALSE, include=FALSE} -->
+<!-- # Function to validate and save each sample -->
+<!-- validate_and_save <- function(sample_name) { -->
+<!--   sample_data <- get(sample_name) -->
+<!--   cross_val <- sits_validate(sample_data$data) -->
+<!--   saveRDS(cross_val, file = here("r_objects", "AT_ATLIBERIA", -->
+<!--                                  glue("cross_val_{sample_name}.rds"))) -->
+<!--   } -->
+
+<!-- # Apply the function to each sample -->
+<!-- walk(sample_names, validate_and_save) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- cross_val_samples_SOM_02_02_new_cluster -->
+<!-- cross_val_samples_SOM_04_02_new_cluster -->
+<!-- cross_val_samples_SOM_06_02_new_cluster -->
+<!-- cross_val_samples_SOM_08_02_new_cluster -->
+<!-- cross_val_samples_SOM_02_04_new_cluster -->
+<!-- cross_val_samples_SOM_04_04_new_cluster -->
+<!-- cross_val_samples_SOM_06_04_new_cluster -->
+<!-- cross_val_samples_SOM_08_04_new_cluster -->
+<!-- cross_val_samples_SOM_02_06_new_cluster -->
+<!-- cross_val_samples_SOM_04_06_new_cluster -->
+<!-- cross_val_samples_SOM_06_06_new_cluster -->
+<!-- cross_val_samples_SOM_08_06_new_cluster -->
+<!-- cross_val_samples_SOM_02_08_new_cluster -->
+<!-- cross_val_samples_SOM_04_08_new_cluster -->
+<!-- cross_val_samples_SOM_06_08_new_cluster -->
+<!-- cross_val_samples_SOM_08_08_new_cluster -->
+<!-- ``` -->
+
+<!-- ### Grid 25 x 25 -->
+
+<!-- ```{r} -->
+<!-- sample_names_25 <- c("samples_SOM_25_02_02_new_cluster", -->
+<!--                   "samples_SOM_25_02_04_new_cluster", -->
+<!--                   "samples_SOM_25_02_06_new_cluster", -->
+<!--                   "samples_SOM_25_02_08_new_cluster", -->
+<!--                   "samples_SOM_25_04_02_new_cluster", -->
+<!--                   "samples_SOM_25_04_04_new_cluster", -->
+<!--                   "samples_SOM_25_04_06_new_cluster", -->
+<!--                   "samples_SOM_25_04_08_new_cluster", -->
+<!--                   "samples_SOM_25_06_02_new_cluster", -->
+<!--                   "samples_SOM_25_06_04_new_cluster", -->
+<!--                   "samples_SOM_25_06_06_new_cluster", -->
+<!--                   "samples_SOM_25_06_08_new_cluster", -->
+<!--                   "samples_SOM_25_08_02_new_cluster", -->
+<!--                   "samples_SOM_25_08_04_new_cluster", -->
+<!--                   "samples_SOM_25_08_06_new_cluster", -->
+<!--                   "samples_SOM_25_08_08_new_cluster") -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- # Apply the function to each sample -->
+<!-- walk(sample_names_25, validate_and_save) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- cross_val_samples_SOM_25_02_02_new_cluster -->
+<!-- cross_val_samples_SOM_25_04_02_new_cluster -->
+<!-- cross_val_samples_SOM_25_06_02_new_cluster -->
+<!-- cross_val_samples_SOM_25_08_02_new_cluster -->
+<!-- cross_val_samples_SOM_25_02_04_new_cluster -->
+<!-- cross_val_samples_SOM_25_04_04_new_cluster -->
+<!-- cross_val_samples_SOM_25_06_04_new_cluster -->
+<!-- cross_val_samples_SOM_25_08_04_new_cluster -->
+<!-- cross_val_samples_SOM_25_02_06_new_cluster -->
+<!-- cross_val_samples_SOM_25_04_06_new_cluster -->
+<!-- cross_val_samples_SOM_25_06_06_new_cluster -->
+<!-- cross_val_samples_SOM_25_08_06_new_cluster -->
+<!-- cross_val_samples_SOM_25_02_08_new_cluster -->
+<!-- cross_val_samples_SOM_25_04_08_new_cluster -->
+<!-- cross_val_samples_SOM_25_06_08_new_cluster -->
+<!-- cross_val_samples_SOM_25_08_08_new_cluster -->
+<!-- ``` -->
 
 ## RSI
 
 ```{r eval=FALSE, include=TRUE}
 cross_val_RSI <- sits_validate(samples_RSI)
-saveRDS(cross_val_RSI, file = here("r_objects", "AT_ALPENNINNE", "cross_val_RSI.rds"))
+saveRDS(cross_val_RSI, file = here("r_objects", "AT_ATLIBERIA", "cross_val_RSI.rds"))
 ```
 
 ```{r}
